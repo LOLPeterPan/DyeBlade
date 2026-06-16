@@ -5,149 +5,134 @@ using System.Collections;
 public class PlayerController : MonoBehaviour
 {
     [Header("Movement")]
-    [SerializeField] private float moveSpeed = 8f;
-    [SerializeField] private float jumpForce = 12f;
+    public float moveSpeed = 8f;
     private float horizontalInput;
+
+    [Header("Rotation")]
+    public float rotationSpeed = 10f;          // 회전 속도 변수입니다. 값이 클수록 더 빠르게 돕니다.
+    private Quaternion targetRotation;         // 목표 회전 값을 저장할 변수
+
+    [Header("Jump")]
+    public float jumpForce = 10f;       
+    public float fallMultiplier = 3.5f;       // [수정] 떨어질 때의 중력 배율을 높여 뚝 떨어지게 만듭니다 (기존 2.5f -> 3.5f)
+    public float jumpCutMultiplier = 5f;      // [추가] 점프 도중 키를 뗐을 때 상승을 강하게 끊어주는 배율입니다.
+
+    [Header("Double Jump")]
+    private int jumpCount = 0;          
+    public int maxJumpCount = 2;        
+
+    [Header("Jump Time Limit")]
+    public float maxJumpHoldTime = 0.3f;      // [추가] 스페이스바를 꾹 누를 수 있는 최대 시간 (예: 0.3초 지나면 자동으로 상승 종료)
+    private float jumpTimeCounter;
+    private bool isJumping;
+
+    [Header("Ground Check")]
+    public Transform groundCheck;
+    public float checkRadius = 0.2f;
+    public LayerMask groundLayer;
     private bool isGrounded;
 
-    [Header("Dash (White System Synergy)")]
-    [SerializeField] private float dashSpeed = 16f;
-    [SerializeField] private float dashDuration = 0.2f;
-    private bool isDashing = false;
-    private bool isInvincible = false; // White 2단계 무적 판정용
-
-    [Header("Dye System (Weapon Override)")]
-    [SerializeField] private int currentAmmo = 0; 
-    private bool isDyeActive = false;
-
-    // 3D 물리 컴포넌트 참조로 수정
     private Rigidbody rb;
-    private PlayerWeapon playerWeapon;
 
-    [Header("Ground Check (3D Physics)")]
-    [SerializeField] private Transform groundCheckPoint;
-    [SerializeField] private float groundCheckRadius = 0.2f;
-    [SerializeField] private LayerMask groundLayer; // 바닥 세팅된 3D Layer
-
-    private void Awake()
+    void Start()
     {
-        rb = GetComponent<Rigidbody>();
-        playerWeapon = GetComponent<PlayerWeapon>();
-
-        // 코딩으로 안전하게 Z축 및 회전 고정 (인스펙터 설정을 깜빡했을 때를 대비)
+        rb = GetComponent<Rigidbody>() == null ? gameObject.AddComponent<Rigidbody>() : GetComponent<Rigidbody>();
         rb.constraints = RigidbodyConstraints.FreezePositionZ | RigidbodyConstraints.FreezeRotation;
     }
 
-    private void Update()
+    void Update()
     {
-        if (isDashing) return;
-
+        // 1. 입력 받기 및 바닥 체크
         horizontalInput = Input.GetAxisRaw("Horizontal");
+        isGrounded = Physics.CheckSphere(groundCheck.position, checkRadius, groundLayer);
 
-        // 3D 점프 입력 처리
-        if (Input.GetButtonDown("Jump") && isGrounded)
+        // 바닥에 안정적으로 착지하면 점프 횟수 초기화
+        if (isGrounded && rb.velocity.y <= 0)
         {
-            rb.velocity = new Vector3(rb.velocity.x, jumpForce, 0f);
+            jumpCount = 0;
         }
 
-        if (Input.GetKeyDown(KeyCode.LeftShift) && !isDashing)
+        // 2. 점프 시작 (스페이스바를 최초로 누른 순간)
+        if (Input.GetButtonDown("Jump"))
         {
-            StartCoroutine(DashRoutine());
+            if (isGrounded || jumpCount < maxJumpCount)
+            {
+                jumpCount++;
+                isJumping = true;
+                jumpTimeCounter = maxJumpHoldTime; // 최대 상승 제한 타이머 리셋
+
+                // 첫 점프와 2단 점프의 힘 차등 적용 (2번째는 2/3 강도)
+                float currentJumpForce = jumpForce;
+                if (jumpCount == 2)
+                {
+                    currentJumpForce = jumpForce * (2f / 3f);
+                }
+
+                rb.velocity = new Vector3(rb.velocity.x, currentJumpForce, 0f);
+            }
         }
 
-        if (Input.GetKeyDown(KeyCode.Z)) 
+        // 3. 점프 키를 유지하고 있을 때 (최대 제한 시간 동안만 상승 보장)
+        if (Input.GetButton("Jump") && isJumping)
         {
-            Attack();
+            if (jumpTimeCounter > 0)
+            {
+                // 시간에 따라 타이머를 깎아 나갑니다.
+                jumpTimeCounter -= Time.deltaTime;
+            }
+            else
+            {
+                // 설정한 시간(maxJumpHoldTime)을 초과하면 강제로 상승 상태를 해제합니다.
+                isJumping = false; 
+            }
         }
+
+        // 4. 점프 키에서 손을 떼거나 강제 종료되었을 때 상승 속도를 급격히 제어
+        if (Input.GetButtonUp("Jump"))
+        {
+            isJumping = false;
+        }
+
+        // 5. [핵심 수정] 엉덩이가 보이지 않도록 Y축 회전 각도 수정
+        // 오른쪽 이동(AD 중 D) : 0도 (카메라를 정면으로 바라보는 기준에서 오른쪽 배치)
+        // 왼쪽 이동(AD 중 A) : 180도 (정면을 유지한 채 180도 회전하므로 뒷면이 안 보임)
+        if (horizontalInput > 0) 
+        {
+            targetRotation = Quaternion.Euler(0, -90, 0);
+        }
+        else if (horizontalInput < 0) 
+        {
+            targetRotation = Quaternion.Euler(0, 90, 0);
+        }
+
+        // 부드러운 구면 선형 보간 회전 실행
+        transform.rotation = Quaternion.Slerp(transform.rotation, targetRotation, rotationSpeed * Time.deltaTime);
     }
 
-    private void FixedUpdate()
+    void FixedUpdate()
     {
-        if (isDashing) return;
-
-        // X축(좌우) 속도는 유지하되, Z축(앞뒤) 속도는 0으로 강제 고정
+        // 6. 좌우 이동 적용
         rb.velocity = new Vector3(horizontalInput * moveSpeed, rb.velocity.y, 0f);
-        
-        // 3D 물리 기반의 지면 체크 (OverlapSphere 사용)
-        isGrounded = Physics.OverlapSphere(groundCheckPoint.position, groundCheckRadius, groundLayer).Length > 0;
-    }
 
-    public void ApplyDye(int ammoAmount)
-    {
-        currentAmmo = ammoAmount;
-        isDyeActive = true;
-        Debug.Log($"염료 획득! 탄약: {currentAmmo}발 패턴 오버라이드 활성화");
-    }
-
-    private void Attack()
-    {
-        if (isDyeActive && currentAmmo > 0)
+        // 7. 속도감 있는 낙하를 위한 물리 법칙 세부 제어 (체공시간 단축 핵심)
+        if (rb.velocity.y < 0)
         {
-            ExecuteDyeAttack();
+            // 하강 중일 때는 묵직하고 빠르게 툭 떨어지도록 높은 중력을 적용합니다.
+            rb.velocity += Vector3.up * Physics.gravity.y * (fallMultiplier - 1) * Time.fixedDeltaTime;
         }
-        else
+        else if (rb.velocity.y > 0 && !isJumping)
         {
-            ExecuteBaseAttack();
+            // 스페이스바를 뗐거나 최대 시간에 도달해 상승이 끊겼을 때, 위로 향하던 관성을 강제로 억제해 즉시 하강하도록 만듭니다.
+            rb.velocity += Vector3.up * Physics.gravity.y * (jumpCutMultiplier - 1) * Time.fixedDeltaTime;
         }
     }
 
-    private void ExecuteBaseAttack()
-    {
-        Debug.Log("기본 공격 실행 (Swing 패턴)");
-    }
-
-    private void ExecuteDyeAttack()
-    {
-        Debug.Log("염료 오버라이드 공격 실행 (Projectile 패턴)");
-
-        currentAmmo--;
-        if (currentAmmo <= 0)
-        {
-            isDyeActive = false;
-            Debug.Log("염료 소진, 기본 무기로 롤백");
-        }
-    }
-
-    private IEnumerator DashRoutine()
-    {
-        isDashing = true;
-        
-        // 3D 중력 제어
-        bool originalUseGravity = rb.useGravity;
-        rb.useGravity = false;
-        
-        float dashDirection = horizontalInput != 0 ? Mathf.Sign(horizontalInput) : 1f;
-        rb.velocity = new Vector3(dashDirection * dashSpeed, 0f, 0f);
-
-        if (playerWeapon != null && playerWeapon.whiteStage >= 2)
-        {
-            isInvincible = true;
-            TriggerWhiteShockwave();
-        }
-
-        yield return new WaitForSeconds(dashDuration);
-
-        isInvincible = false;
-        rb.useGravity = originalUseGravity;
-        rb.velocity = new Vector3(0f, rb.velocity.y, 0f);
-        isDashing = false;
-    }
-
-    private void TriggerWhiteShockwave()
-    {
-        Debug.Log("White 2단계: 대시 무속성 충격파 발동!");
-    }
-
-    public void TakeDamage(int damage)
-    {
-        if (isInvincible) return;
-    }
-
-    // 에디터 뷰에서 기즈모로 바닥 체크 범위 시각화
     private void OnDrawGizmosSelected()
     {
-        if (groundCheckPoint == null) return;
-        Gizmos.color = Color.red;
-        Gizmos.DrawWireSphere(groundCheckPoint.position, groundCheckRadius);
+        if (groundCheck != null)
+        {
+            Gizmos.color = Color.red;
+            Gizmos.DrawWireSphere(groundCheck.position, checkRadius);
+        }
     }
 }
